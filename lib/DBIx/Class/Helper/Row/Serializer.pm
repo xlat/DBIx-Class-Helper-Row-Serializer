@@ -103,4 +103,59 @@ sub serialize{
 	return $col_data;
 }
 
+sub unserialize{
+    my ($self, $serialized, %args) = @_;
+    unless(ref($serialized) eq 'HASH'){
+        $DB::single=1;
+        return;
+    }
+    #~ if(!ref($self) and $self eq __PACKAGE__){
+        #~ return $self->new->unserialize($serialized, %args);
+    #~ }
+
+    #- unserialize first all relationships (resursively) and push some defered in a queue with everything needed to attach it with it's container
+    my $rsrc = $self->result_source;
+    my @defereds;
+    my $relationships = $self->hrs_serializable_relationships;
+    RELATION:
+    for my $rel_name ( @$relationships ){
+        my $related = delete $serialized->{$rel_name}
+            or next RELATION;
+        my $related_class = $rsrc->relationship_info($rel_name)->{class};
+        push @defereds, [$related_class => $rel_name => $related];
+    }
+    #   and to do something like: $self->new_related( $rel_name => $related_data )
+    #- unserialize $self attributs like $self = $self->new( $data )
+    $DB::single=1 unless ref($serialized) eq 'HASH';
+    $self->set_columns( $serialized );
+    # - process defered queue for attaching relationships to $self
+    DEFERED:
+    for my $related ( @defereds ){
+        my ($class, $name, $data) = @$related;
+        #TODO: assert for $class->can('unserialize');
+        #               but it should be the case as it's supposed to be serialized!
+        my $entity = $class->new->unserialize( $data , %args )
+            or next DEFERED;
+        #unsure!
+        $self->new_related( $name => $entity );
+    }
+    # - return toplevel entity (not saved!)
+    return $self;
+}
+
+#injection hacks
+sub unserialize_rs{
+    my ($rs,  @serialized) = @_;
+    #~ my $result_class = $rs->result_source->result_class;
+    #magically works even if result-class does not have imported Helper::Row::Serializer component.
+    #~ my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($result_class->new(), $_) } @serialized;
+    my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($rs->new({}), $_) } @serialized;
+    return @deserialized if @serialized > 1;
+    return $deserialized[0];
+}
+
+package DBIx::Class::Helper::ResultSet::Seriliazer;
+sub unserialize{ &DBIx::Class::Helper::Row::Serializer::unserialize_rs  }
+require DBIx::Class::ResultSet;
+DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Seriliazer');
 1;
