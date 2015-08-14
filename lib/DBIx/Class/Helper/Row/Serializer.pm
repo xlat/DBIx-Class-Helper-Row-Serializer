@@ -3,6 +3,7 @@ package DBIx::Class::Helper::Row::Serializer;
 #ABSTRACT: Convenient serializing with DBIx::Class.
 use Modern::Perl;
 use parent 'DBIx::Class::Row';
+use constant DEBUG => 0;
 
 # 'is_serializable' may conflict with DBIx::Class::Helper::Row::ToJSON
 my $IS_SERIALISABLE  = 'is_serializable';
@@ -15,7 +16,7 @@ sub hrs_is_column_serializable {
     my $info = $self->column_info($column);
     if (!defined $info->{$IS_SERIALISABLE}) {
         #ignore autoincrement columns
-    if (exists $info->{is_auto_increment} &&
+        if (exists $info->{is_auto_increment} &&
             $info->{is_auto_increment}
         ) {
             $info->{$IS_SERIALISABLE} = 0;
@@ -62,18 +63,27 @@ sub hrs_is_relationship_serializable {
 sub hrs_serializable_relationships {
     my $self = shift;
     if (!$self->_hrs_serializable_relationships) {
-        $self->_hrs_serializable_relationships([
-            grep $self->hrs_is_relationship_serializable($_),
-                $self->result_source->relationships
+        my $rs = $self->result_source;
+        $self->_hrs_serializable_relationships([ 
+            sort {
+                #customize relation priority see "04_unserialize_relations.t".
+                my $a_ri = $rs->relationship_info($a);
+                my $b_ri = $rs->relationship_info($b);
+                my $a_priority = $a_ri->{attrs}{unserialization_priority}//0;
+                my $b_priority = $b_ri->{attrs}{unserialization_priority}//0;
+                $b_priority <=> $a_priority
+            }
+            grep $self->hrs_is_relationship_serializable($_), 
+                $rs->relationships
         ]);
    }
    return $self->_hrs_serializable_relationships;
 }
 
 sub serialize{
-    my ($self, %args) = @_;
+    my ($self, $args, $root, $container) = @_;
 	return unless $self->isa('DBIx::Class::Helper::Row::Serializer');
-	
+	$root //= $self;
     my $columns = $self->hrs_serializable_columns;
     my $columns_info = $self->columns_info($columns);
 	my $col_data = {
@@ -81,37 +91,44 @@ sub serialize{
         map +($columns_info->{$_}{accessor} || $_),
         keys %$columns_info
     };
-	 my $rel_names_copied = {};
-     my $rsrc = $self->result_source;
-     my $relationships = $self->hrs_serializable_relationships;
+    my $rel_names_copied = {};
+    my $rsrc = $self->result_source;
+    my $relationships = $self->hrs_serializable_relationships;
 	RELATIONSHIP:
 	foreach my $rel_name (@$relationships) {
 		my $rel_info = $rsrc->relationship_info($rel_name);
-		my $serializer = exists $rel_info->{attrs}{serialize}
-						 ? $rel_info->{attrs}{serialize}
+		my $serializer = exists $rel_info->{attrs}{serializer}
+						 ? $rel_info->{attrs}{serializer}
 						 : ( $rel_info->{class}->can('serialize')
 							// \&serialize )
                          ;
 		my $copied = $rel_names_copied->{ $rel_info->{source} } ||= {};
 		my @relateds =
-            map { $serializer->($_, %args) }
+            map { $serializer->($_, $args, $root, $self) }
             grep{ $copied->{$_->ID}++ == 0 }
     		$self->search_related($rel_name)->all;
-		$col_data->{$rel_name} = \@relateds if @relateds;
+        if(@relateds){
+            if(($rel_info->{attrs}{accessor} || '') eq 'single'){
+                $col_data->{$rel_name} = shift @relateds;
+            }
+            else{
+                $col_data->{$rel_name} = \@relateds;
+            }
+        }
 	}
-	$col_data->{__CLASS__} = ref($self) if $args{debug} or $args{class};
+	$col_data->{__CLASS__} = ref($self) if $args->{debug} or $args->{class};
 	return $col_data;
 }
 
 sub unserialize{
-    my ($self, $serialized, %args) = @_;
+    my ($self, $serialized, $args, $root, $container) = @_;
     unless(ref($serialized) eq 'HASH'){
-        $DB::single=1;
+        warn "unserialize must take a hash ref!";
         return;
     }
-    #~ if(!ref($self) and $self eq __PACKAGE__){
-        #~ return $self->new->unserialize($serialized, %args);
-    #~ }
+
+    my $is_root = !defined $root;
+    $root //= $self;
 
     #- unserialize first all relationships (resursively) and push some defered in a queue with everything needed to attach it with it's container
     my $rsrc = $self->result_source;
@@ -121,36 +138,57 @@ sub unserialize{
     for my $rel_name ( @$relationships ){
         my $related = delete $serialized->{$rel_name}
             or next RELATION;
-        my $related_class = $rsrc->relationship_info($rel_name)->{class};
-        push @defereds, [$related_class => $rel_name => $related];
+        my $rel_info = $rsrc->relationship_info($rel_name);
+        my $reverse_rel = $rsrc->reverse_relationship_info($rel_name);
+        my $related_class = $rel_info->{class};
+        my $unserializer = exists $rel_info->{attrs}{unserializer}
+                 ? $rel_info->{attrs}{unserializer}
+                 : ( $related_class->can('unserialize')
+                    // \&unserialize )
+                 ;
+        $related = [ $related ] unless ref($related) eq 'ARRAY';
+        RELATED:
+        for my $serial ( @$related ){
+            my $obj = $self->schema->resultset($related_class)->new_result({});
+            push @defereds, sub{ 
+                say "unserializing ", $rsrc->name, "->", $rel_name if DEBUG;
+                $unserializer->($obj, $serial, $args, $root, $self) 
+            };
+            hrs_set_relationship( $self, $rel_name, $obj, $rel_info );
+            #plus reverse relation(s)
+            while(my ($rev_name, $rev_info) = each %$reverse_rel){
+                hrs_set_relationship( $obj, $rev_name, $self, $rev_info );
+            }
+        }
     }
-    #   and to do something like: $self->new_related( $rel_name => $related_data )
-    #- unserialize $self attributs like $self = $self->new( $data )
-    $DB::single=1 unless ref($serialized) eq 'HASH';
+    #- unserialize $self attributs
     $self->set_columns( $serialized );
-    # - process defered queue for attaching relationships to $self
-    DEFERED:
-    for my $related ( @defereds ){
-        my ($class, $name, $data) = @$related;
-        #TODO: assert for $class->can('unserialize');
-        #               but it should be the case as it's supposed to be serialized!
-        my $entity = $class->new->unserialize( $data , %args )
-            or next DEFERED;
-        #unsure!
-        $self->new_related( $name => $entity );
-    }
-    # - return toplevel entity (not saved!)
+    # - process defered queue to fill prepared entities
+    $_->() for @defereds;
+    # - return toplevel entity (not stored yet)
     return $self;
+}
+
+sub hrs_set_relationship{
+    my ($self, $rel_name, $related, $rel_info) = @_;
+    say "unserializing : set rel", $self->result_source->name, " -> ", $rel_name if DEBUG;
+    $rel_info //=  $self->result_source->relationship_info($rel_name);
+    if(($rel_info->{attrs}{accessor} || '') eq 'single'){
+        say "hrs_set_relationship ", $rel_name, " set single value" if DEBUG;
+        $self->{_relationship_data}{$rel_name} = $related;
+    }
+    else{
+        say "hrs_set_relationship ", $rel_name, " pushing on array" if DEBUG;
+        push @{$self->{_relationship_data}{$rel_name}}, $related;
+    }
 }
 
 #injection hacks
 sub unserialize_rs{
-    my ($rs,  @serialized) = @_;
-    #~ my $result_class = $rs->result_source->result_class;
-    #magically works even if result-class does not have imported Helper::Row::Serializer component.
-    #~ my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($result_class->new(), $_) } @serialized;
-    my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($rs->new({}), $_) } @serialized;
-    return @deserialized if @serialized > 1;
+    my ($rs,  $serialized, $args) = @_;
+    $serialized = [ $serialized ] unless ref($serialized) eq 'ARRAY';
+    my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($rs->new({}), $_, $args) } @$serialized;
+    return @deserialized if @$serialized > 1;
     return $deserialized[0];
 }
 
@@ -158,4 +196,45 @@ package DBIx::Class::Helper::ResultSet::Seriliazer;
 sub unserialize{ &DBIx::Class::Helper::Row::Serializer::unserialize_rs  }
 require DBIx::Class::ResultSet;
 DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Seriliazer');
+
 1;
+__END__
+=pod
+=head1 Serialisation
+
+The serialisation will NOT serialize autoincrement columns, this is because unserialization will not works 
+in most of the cases because of duplicated values.
+Relations beteween objects are kept using a tree structure using embedded hashes and arrays.
+A belongs_to is  not serialized by default but can be forced by specifying C<is_serializable => 1> in the
+ResultClass definition.
+
+=head1 BAD designed DB serialisation
+
+Having a bad/specific designed database, it can be hard to serialize and unserialize automagically.
+For the sake of exemple:
+
+	Script
+		-> defs: @Definition
+			<- script: Script
+			-> referers: @Variable
+				<- script: Script
+				-> definition: Definition
+		-> vars: @Variable[]
+				<- script: Script
+				-> definition: Definition
+
+In this exemple, a Definition is referenced by a Script and by Variable(s) and a Variable is 
+referenced by a Script and by a Definition.
+
+Producing a serialization form that can keep track of this kind of relations is a bit hard. It is possible 
+to ignore some columns or relations from being serialized by specifying C<is_serializable => 0> in the
+ResultClass definition. You can write custom serializer and unserializer for your ResultClass or by relation.
+It is also possible to customize unserialization priorities for relationships by specifying 
+C<unserialization_priority => -1> in the ResultClass definition, relationships will be processed in the priority order (numeric).
+
+=head1 TODO
+
+Provide hooks to access has_to_many relations within a custom unserializer, actualy it is needed to look in "_relationship_data" 
+internal DBIx::Class::Row object.
+
+=cut

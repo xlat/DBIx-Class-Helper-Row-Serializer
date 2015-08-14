@@ -1,6 +1,7 @@
 use utf8;
 use Test::More;
 use Test::DBIC;
+use Storable qw(dclone);
 use Modern::Perl;
 
 use_ok 'DBIx::Class::Helper::Row::Serializer';
@@ -114,7 +115,7 @@ FOO:
 for my $foo ( @foo ){
     is_deeply $foo->serialize, $expecteds[$i++], "foo$i serialization";
 }
-my $foo1 = $schema->resultset('Foo')->unserialize( $expecteds[0] );
+my $foo1 = $schema->resultset('Foo')->unserialize( dclone($expecteds[0]) );
 is ref($foo1), 'MyApp::Schema::Foo', 'unserialize result class';
 is ref($foo1->insert), 'MyApp::Schema::Foo', 'insert a new Foo';
 my $reserialize = $foo1->serialize;
