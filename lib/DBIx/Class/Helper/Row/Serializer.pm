@@ -6,7 +6,21 @@ use parent 'DBIx::Class::Row';
 use constant DEBUG => 0;
 
 # 'is_serializable' may conflict with DBIx::Class::Helper::Row::ToJSON
-my $IS_SERIALISABLE  = 'is_serializable';
+my $HRS = 'DBIx::Class::Row';
+$HRS->mk_group_accessors(inherited => '_hrs_is_serializable');
+$HRS->_hrs_is_serializable('is_serializable');
+
+=head2 IS_SERIALIZABLE
+
+Should not be manipulated, reserved for internal usages.
+If attribut 'is_serializable' conflicts with DBIC:R:H:ToJSON,
+just make a call in your Result base class to
+DBIx::Class::Row->_hrs_is_serializable('other_is_serializable').
+It will change the attribut name this package will look at in place
+of 'is_serializable'.
+
+=cut
+sub IS_SERIALIZABLE{ $HRS->_hrs_is_serializable }
 
 __PACKAGE__->mk_group_accessors(inherited => '_hrs_serializable_columns');
 __PACKAGE__->mk_group_accessors(inherited => '_hrs_serializable_relationships');
@@ -19,17 +33,17 @@ Should not be manipulated, reserved for internal usages.
 sub hrs_is_column_serializable {
     my ( $self, $column ) = @_;
     my $info = $self->column_info($column);
-    if (!defined $info->{$IS_SERIALISABLE}) {
+    if (!defined $info->{IS_SERIALIZABLE()}) {
         #ignore autoincrement columns
         if (exists $info->{is_auto_increment} &&
             $info->{is_auto_increment}
         ) {
-            $info->{$IS_SERIALISABLE} = 0;
+            $info->{IS_SERIALIZABLE()} = 0;
         } else {
-            $info->{$IS_SERIALISABLE} = 1;
+            $info->{IS_SERIALIZABLE()} = 1;
         }
     }
-    return $info->{$IS_SERIALISABLE};
+    return $info->{IS_SERIALIZABLE()};
 }
 
 =head2 hrs_serializable_columns
@@ -67,12 +81,12 @@ sub hrs_is_relationship_serializable {
     my $rsrc = $self->result_source;
     my $rel_info = $rsrc->relationship_info($rel_name);
     
-    if(!exists $rel_info->{attrs}{$IS_SERIALISABLE}){
-        $rel_info->{attrs}{$IS_SERIALISABLE} = 
+    if(!exists $rel_info->{attrs}{IS_SERIALIZABLE()}){
+        $rel_info->{attrs}{IS_SERIALIZABLE()} = 
             $rel_info->{attrs}{cascade_copy} // 0;
     }
 
-    return $rel_info->{attrs}{$IS_SERIALISABLE};
+    return $rel_info->{attrs}{IS_SERIALIZABLE()};
 }
 
 =head2 hrs_serializable_relationships
@@ -186,7 +200,11 @@ sub unserialize{
         $related = [ $related ] unless ref($related) eq 'ARRAY';
         RELATED:
         for my $serial ( @$related ){
-            my $obj = $self->schema->resultset($related_class)->new_result({});
+            my $obj = $self
+                        ->result_source
+                        ->schema
+                        ->resultset($related_class)
+                        ->new_result({});
             push @defereds, sub{ 
                 say "unserializing ", $rsrc->name, "->", $rel_name if DEBUG;
                 $unserializer->($obj, $serial, $args, $root, $self) 
