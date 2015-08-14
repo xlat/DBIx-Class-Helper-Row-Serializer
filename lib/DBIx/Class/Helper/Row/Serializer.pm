@@ -1,7 +1,7 @@
 package DBIx::Class::Helper::Row::Serializer;
-
-#ABSTRACT: Convenient serializing with DBIx::Class.
 use Modern::Perl;
+#ABSTRACT: Convenient serializing with DBIx-Class
+# VERSION
 use parent 'DBIx::Class::Row';
 use constant DEBUG => 0;
 
@@ -11,6 +11,11 @@ my $IS_SERIALISABLE  = 'is_serializable';
 __PACKAGE__->mk_group_accessors(inherited => '_hrs_serializable_columns');
 __PACKAGE__->mk_group_accessors(inherited => '_hrs_serializable_relationships');
 
+=head2 hrs_is_column_serializable
+
+Should not be manipulated, reserved for internal usages.
+
+=cut
 sub hrs_is_column_serializable {
     my ( $self, $column ) = @_;
     my $info = $self->column_info($column);
@@ -26,7 +31,12 @@ sub hrs_is_column_serializable {
     }
     return $info->{$IS_SERIALISABLE};
 }
- 
+
+=head2 hrs_serializable_columns
+
+Should not be manipulated, reserved for internal usages.
+
+=cut 
 sub hrs_serializable_columns {
     my $self = shift;
     if (!$self->_hrs_serializable_columns) {
@@ -46,6 +56,11 @@ sub hrs_serializable_columns {
    return $self->_hrs_serializable_columns;
 }
 
+=head2 hrs_is_relationship_serializable
+
+Should not be manipulated, reserved for internal usages.
+
+=cut 
 sub hrs_is_relationship_serializable {
     my ( $self, $rel_name ) = @_;
     
@@ -60,6 +75,11 @@ sub hrs_is_relationship_serializable {
     return $rel_info->{attrs}{$IS_SERIALISABLE};
 }
 
+=head2 hrs_serializable_relationships
+
+Should not be manipulated, reserved for internal usages.
+
+=cut 
 sub hrs_serializable_relationships {
     my $self = shift;
     if (!$self->_hrs_serializable_relationships) {
@@ -80,6 +100,15 @@ sub hrs_serializable_relationships {
    return $self->_hrs_serializable_relationships;
 }
 
+
+=head2 serialize
+
+Serialize a ResultClass and embedded ones
+
+    my $serial = $self->serialize(\%args);
+    
+
+=cut
 sub serialize{
     my ($self, $args, $root, $container) = @_;
 	return unless $self->isa('DBIx::Class::Helper::Row::Serializer');
@@ -120,6 +149,14 @@ sub serialize{
 	return $col_data;
 }
 
+=head2 unserialize
+
+Unzerialize a ResultClass but did not store.
+
+    my $result = $self->unserialize($serial);
+    $result->insert;
+    
+=cut 
 sub unserialize{
     my ($self, $serialized, $args, $root, $container) = @_;
     unless(ref($serialized) eq 'HASH'){
@@ -169,6 +206,13 @@ sub unserialize{
     return $self;
 }
 
+=head2 hrs_set_relationship
+
+Set a relationship between two ResultClass.
+
+    $self->hrs_serializable_relationships($rel_name, $related);
+    
+=cut 
 sub hrs_set_relationship{
     my ($self, $rel_name, $related, $rel_info) = @_;
     say "unserializing : set rel", $self->result_source->name, " -> ", $rel_name if DEBUG;
@@ -183,7 +227,11 @@ sub hrs_set_relationship{
     }
 }
 
-#injection hacks
+=head2 unserialize_rs
+
+Should not be manipulated, reserved for internal usages.
+
+=cut 
 sub unserialize_rs{
     my ($rs,  $serialized, $args) = @_;
     $serialized = [ $serialized ] unless ref($serialized) eq 'ARRAY';
@@ -192,7 +240,8 @@ sub unserialize_rs{
     return $deserialized[0];
 }
 
-package DBIx::Class::Helper::ResultSet::Seriliazer;
+package #hide the hack
+    DBIx::Class::Helper::ResultSet::Seriliazer;
 sub unserialize{ &DBIx::Class::Helper::Row::Serializer::unserialize_rs  }
 require DBIx::Class::ResultSet;
 DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Seriliazer');
@@ -200,7 +249,7 @@ DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Serili
 1;
 __END__
 =pod
-=head1 Serialisation
+=head1 Serialization
 
 The serialisation will NOT serialize autoincrement columns, this is because unserialization will not works 
 in most of the cases because of duplicated values.
