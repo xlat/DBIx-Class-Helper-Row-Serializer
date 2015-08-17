@@ -253,7 +253,10 @@ Should not be manipulated, reserved for internal usages.
 sub unserialize_rs{
     my ($rs,  $serialized, $args) = @_;
     $serialized = [ $serialized ] unless ref($serialized) eq 'ARRAY';
-    my @deserialized = map{ DBIx::Class::Helper::Row::Serializer::unserialize($rs->new({}), $_, $args) } @$serialized;
+    my $unserializer = $rs->result_class->can('unserialize') // \&unserialize;
+    my @deserialized = map{
+        $unserializer->($rs->new({}), $_, $args)
+    } @$serialized;
     return @deserialized if @$serialized > 1;
     return $deserialized[0];
 }
