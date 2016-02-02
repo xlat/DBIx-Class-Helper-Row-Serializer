@@ -245,27 +245,44 @@ sub hrs_set_relationship{
     }
 }
 
+=head2 serialize_rs
+
+Should not be manipulated, reserved for internal usages.
+
+=cut 
+sub serialize_rs{
+    my ($rs,  $args) = @_;
+    my $serializer = $rs->result_class->can('serialize') // \&serialize;
+    my @serialized = grep { defined() } map{
+        $serializer->($_, $args)
+    } $rs->all;
+    return \@serialized if @serialized > 1;
+    return $serialized[0] if @serialized;
+    return [];
+}
+
 =head2 unserialize_rs
 
 Should not be manipulated, reserved for internal usages.
 
 =cut 
 sub unserialize_rs{
-    my ($rs,  $serialized, $args) = @_;
+    my ($rs,  $serialized, $args, $root, $container) = @_;
     $serialized = [ $serialized ] unless ref($serialized) eq 'ARRAY';
     my $unserializer = $rs->result_class->can('unserialize') // \&unserialize;
     my @deserialized = map{
-        $unserializer->($rs->new({}), $_, $args)
+        $unserializer->($rs->new({}), $_, $args, $root, $container)
     } @$serialized;
     return @deserialized if @$serialized > 1;
     return $deserialized[0];
 }
 
 package #hide the hack
-    DBIx::Class::Helper::ResultSet::Seriliazer;
+    DBIx::Class::Helper::ResultSet::Serializer;
+sub serialize{ &DBIx::Class::Helper::Row::Serializer::serialize_rs  }
 sub unserialize{ &DBIx::Class::Helper::Row::Serializer::unserialize_rs  }
 require DBIx::Class::ResultSet;
-DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Seriliazer');
+DBIx::Class::ResultSet->load_components('+DBIx::Class::Helper::ResultSet::Serializer');
 
 1;
 __END__
