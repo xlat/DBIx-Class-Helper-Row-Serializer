@@ -205,15 +205,19 @@ sub unserialize{
                         ->schema
                         ->resultset($related_class)
                         ->new_result({});
-            push @defereds, sub{ 
-                say "unserializing ", $rsrc->name, "->", $rel_name if DEBUG;
-                $unserializer->($obj, $serial, $args, $root, $self) 
-            };
-            hrs_set_relationship( $self, $rel_name, $obj, $rel_info );
+            my @undoers;
+            push @undoers, hrs_set_relationship( $self, $rel_name, $obj, $rel_info );
             #plus reverse relation(s)
             while(my ($rev_name, $rev_info) = each %$reverse_rel){
-                hrs_set_relationship( $obj, $rev_name, $self, $rev_info );
+                push @undoers, hrs_set_relationship( $obj, $rev_name, $self, $rev_info );
             }
+            push @defereds, sub{ 
+                say "unserializing ", $rsrc->name, "->", $rel_name if DEBUG;
+                $unserializer->($obj, $serial, $args, $root, $self) or do{
+                    say "canelling a relationship ", $rsrc->name, "->", $rel_name if DEBUG;
+                    $_->() for grep{ defined() } @undoers;
+                };
+            };
         }
     }
     #- unserialize $self attributs
@@ -227,8 +231,9 @@ sub unserialize{
 =head2 hrs_set_relationship
 
 Set a relationship between two ResultClass.
+Returns a closure that allow to cancel relation ship.
 
-    $self->hrs_serializable_relationships($rel_name, $related);
+    my $undo_coderef = $self->hrs_serializable_relationships($rel_name, $related);
     
 =cut 
 sub hrs_set_relationship{
@@ -238,10 +243,25 @@ sub hrs_set_relationship{
     if(($rel_info->{attrs}{accessor} || '') eq 'single'){
         say "hrs_set_relationship ", $rel_name, " set single value" if DEBUG;
         $self->{_relationship_data}{$rel_name} = $related;
+        #returns a closure that allow to cancel relation ship
+        return sub{
+            delete $self->{_relationship_data}{$rel_name};
+        };
     }
     else{
-        say "hrs_set_relationship ", $rel_name, " pushing on array" if DEBUG;
-        push @{$self->{_relationship_data}{$rel_name}}, $related;
+        if(defined $related){
+            say "hrs_set_relationship ", $rel_name, " pushing on array" if DEBUG;
+            push @{$self->{_relationship_data}{$rel_name}}, $related;
+            #returns a closure that allow to cancel relation ship
+            return sub{
+                for (reverse 0..@{$self->{_relationship_data}{$rel_name}}-1){
+                    delete $self->{_relationship_data}{$rel_name}[$_]
+                        if ($self->{_relationship_data}{$rel_name}[$_]//0) == ($related//0);
+                }
+            };
+        }
+        say "hrs_set_relationship ", $rel_name, " DO NOT push 'undef' value on an array" if DEBUG;
+        return;
     }
 }
 
